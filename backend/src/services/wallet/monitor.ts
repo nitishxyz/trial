@@ -113,7 +113,7 @@ export class WalletMonitorService {
         const pubkey = new PublicKey(walletAddress);
         const signatures = await this.connection.getSignaturesForAddress(
           pubkey,
-          { limit: 5 }
+          { limit: 10 }
         );
 
         // Skip if no new transactions
@@ -210,33 +210,58 @@ export class WalletMonitorService {
       const postSol = tx.meta.postBalances[walletAccountIndex] / 1e9;
       const solChange = postSol - preSol;
 
-      // Calculate total SOL change including inner instructions
-      let totalSolChange = solChange;
-      if (tx.meta.innerInstructions) {
-        for (const inner of tx.meta.innerInstructions) {
-          for (const ix of inner.instructions) {
-            if (
-              "parsed" in ix &&
-              ix.parsed.type === "transfer" &&
-              ix.parsed.info.destination === walletAddress
-            ) {
-              totalSolChange -= Number(ix.parsed.info.lamports) / 1e9;
-            }
-            if (
-              "parsed" in ix &&
-              ix.parsed.type === "transfer" &&
-              ix.parsed.info.source === walletAddress
-            ) {
-              totalSolChange += Number(ix.parsed.info.lamports) / 1e9;
-            }
-          }
-        }
-      }
-
       // Get all program IDs involved in this transaction
       const programIds = tx.transaction.message.accountKeys
         .filter((key) => key.signer === false && key.writable === false)
         .map((key) => key.pubkey.toString());
+
+      // Check if this is a simple SOL transfer (deposit/withdrawal)
+      const isSimpleSolTransfer = programIds.length === 0 && solChange !== 0;
+
+      if (isSimpleSolTransfer) {
+        const solColor = solChange >= 0 ? "\x1b[32m" : "\x1b[31m";
+        const changeSymbol = solChange >= 0 ? "📈" : "📉";
+        const sign = solChange >= 0 ? "+" : "-";
+        console.log(
+          `${solColor}SOL TRANSFER ${changeSymbol} ${sign}${Math.abs(
+            solChange
+          ).toFixed(9)}`
+        );
+        console.log(`Balance: ${postSol.toFixed(9)}${"\x1b[0m"}`);
+
+        // Save transfer to database as a special type of trade
+        const user = this.userCache.get(walletAddress);
+        if (user) {
+          const transferData = {
+            userId: user.id,
+            signature,
+            walletAddress,
+            tokenA: "So11111111111111111111111111111111111111112", // Native SOL mint
+            tokenB: "So11111111111111111111111111111111111111112",
+            type: solChange >= 0 ? "deposit" : "withdrawal",
+            amountA: Math.abs(solChange).toString(),
+            amountB: Math.abs(solChange).toString(),
+            priceUsd: "0",
+            platform: "transfer",
+            txFees: "0",
+            timestamp: new Date(blockTime! * 1000),
+            rawData: tx,
+            tradePnl: "0", // Transfers don't affect PnL
+          } as const;
+
+          await db
+            .insert(tradesTable)
+            .values(transferData)
+            .onConflictDoUpdate({
+              target: [tradesTable.signature],
+              set: transferData,
+            });
+
+          // Update the daily PnL with the new balance but don't affect realized PnL
+          await this.updateDailyPnL(walletAddress, postSol, 0);
+        }
+        return; // Skip rest of processing since this is just a transfer
+      }
 
       // Check if this is a trade/swap transaction
       const isSwap = programIds.some((id) => this.SWAP_PROGRAM_IDS.has(id));
@@ -272,13 +297,13 @@ export class WalletMonitorService {
         return;
       }
 
-      const solColor = totalSolChange >= 0 ? "\x1b[32m" : "\x1b[31m";
-      const changeSymbol = totalSolChange >= 0 ? "📈" : "📉";
-      const sign = totalSolChange >= 0 ? "+" : "-";
+      const solColor = solChange >= 0 ? "\x1b[32m" : "\x1b[31m";
+      const changeSymbol = solChange >= 0 ? "📈" : "📉";
+      const sign = solChange >= 0 ? "+" : "-";
       console.log(
-        `${solColor}SOL ${changeSymbol} ${sign}${Math.abs(
-          totalSolChange
-        ).toFixed(9)}`
+        `${solColor}SOL ${changeSymbol} ${sign}${Math.abs(solChange).toFixed(
+          9
+        )}`
       );
       console.log(`Balance: ${postSol.toFixed(9)}${"\x1b[0m"}`);
 
@@ -287,7 +312,7 @@ export class WalletMonitorService {
         preSol,
         postSol,
         basicSolChange: solChange,
-        totalSolChange,
+        totalSolChange: solChange,
         hasInnerInstructions: !!tx.meta.innerInstructions?.length,
         programIds: tx.transaction.message.accountKeys
           .filter((key) => key.signer === false && key.writable === false)
@@ -338,15 +363,15 @@ export class WalletMonitorService {
             tokenB: "So11111111111111111111111111111111111111112",
             type: isBuy ? "buy" : "sell",
             amountA: Math.abs(change).toString(),
-            amountB: Math.abs(totalSolChange).toString(),
+            amountB: Math.abs(solChange).toString(),
             priceUsd: "0",
             platform: "unknown",
             txFees: "0",
             timestamp: new Date(blockTime! * 1000),
             rawData: tx,
             tradePnl: isBuy
-              ? (-Math.abs(totalSolChange)).toString() // When buying, lose SOL
-              : Math.abs(totalSolChange).toString(), // When selling, gain SOL
+              ? (-Math.abs(solChange)).toString() // When buying, lose SOL
+              : Math.abs(solChange).toString(), // When selling, gain SOL
           } as const;
 
           await db
