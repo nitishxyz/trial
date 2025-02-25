@@ -169,6 +169,18 @@ export class WalletMonitorService {
     blockTime?: number
   ) {
     try {
+      // Add check for existing trade at the start
+      const existingTrade = await db
+        .select()
+        .from(tradesTable)
+        .where(eq(tradesTable.signature, signature))
+        .limit(1);
+
+      if (existingTrade.length > 0) {
+        console.log(`Skipping existing trade: ${signature}`);
+        return;
+      }
+
       // Skip if no blockTime or transaction is from before today
       if (!blockTime) return;
 
@@ -369,7 +381,7 @@ export class WalletMonitorService {
                 set: tradeData,
               });
 
-            // Update PnL for swaps
+            // Only update PnL if this is a new trade
             await this.updateDailyPnL(walletAddress, postSol, tradePnl);
           }
         });
