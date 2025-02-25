@@ -5,7 +5,7 @@ import {
 } from "@solana/spl-token";
 import { db } from "../../db";
 import { tradesTable, usersTable, pnlRecordsTable } from "../../db/schema";
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 
 export class WalletMonitorService {
   private connection: Connection;
@@ -217,8 +217,11 @@ export class WalletMonitorService {
 
       if (walletAccountIndex === -1) return;
 
-      // Calculate SOL changes including transaction fees
+      // Initialize daily PnL record before processing transaction
       const preSol = tx.meta.preBalances[walletAccountIndex] / 1e9;
+      await this.initializeDailyPnL(walletAddress, preSol);
+
+      // Calculate SOL changes including transaction fees
       const postSol = tx.meta.postBalances[walletAccountIndex] / 1e9;
       const solChange = postSol - preSol;
 
@@ -441,52 +444,55 @@ export class WalletMonitorService {
 
   private async initializeDailyPnL(
     walletAddress: string,
-    initialBalance: number
+    currentBalance: number
   ) {
-    const pstDate = this.getPSTStartOfDay();
+    const today = this.getPSTStartOfDay();
 
-    // Check if we already have a record for today
+    // Check if we already have a PnL record for today
     const existingRecord = await db
       .select()
       .from(pnlRecordsTable)
       .where(
         and(
           eq(pnlRecordsTable.walletAddress, walletAddress),
-          eq(pnlRecordsTable.date, pstDate)
+          eq(pnlRecordsTable.date, today)
         )
       )
       .limit(1);
 
     if (existingRecord.length === 0) {
-      // Create new PnL record for the day
-      this.dailyPnLCache.set(walletAddress, {
-        date: pstDate,
-        startBalance: initialBalance,
-        currentBalance: initialBalance,
-        realizedPnl: 0,
-        totalTrades: 0,
-      });
+      // Get the last PnL record to carry over the balance
+      const lastRecord = await db
+        .select()
+        .from(pnlRecordsTable)
+        .where(eq(pnlRecordsTable.walletAddress, walletAddress))
+        .orderBy(desc(pnlRecordsTable.date))
+        .limit(1);
 
-      // Insert initial record into database
+      const startBalance =
+        lastRecord.length > 0 && lastRecord[0].endBalance
+          ? parseFloat(lastRecord[0].endBalance)
+          : currentBalance;
+
+      // Create new PnL record for today
       await db.insert(pnlRecordsTable).values({
-        userId: this.userCache.get(walletAddress)?.id,
         walletAddress,
-        date: pstDate,
-        startBalance: initialBalance.toString(),
+        date: today,
+        startBalance: startBalance.toString(),
+        endBalance: currentBalance.toString(),
         realizedPnl: "0",
         totalTrades: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       });
-    } else {
-      // Load existing record into cache
-      const record = existingRecord[0];
+
+      // Update cache
       this.dailyPnLCache.set(walletAddress, {
-        date: record.date,
-        startBalance: parseFloat(record.startBalance.toString()),
-        currentBalance: parseFloat(
-          record.endBalance?.toString() || record.startBalance.toString()
-        ),
-        realizedPnl: parseFloat(record.realizedPnl.toString()),
-        totalTrades: record.totalTrades,
+        date: today,
+        startBalance,
+        currentBalance,
+        realizedPnl: 0,
+        totalTrades: 0,
       });
     }
   }
