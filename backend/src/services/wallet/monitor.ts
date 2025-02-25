@@ -27,13 +27,12 @@ export class WalletMonitorService {
   > = new Map();
 
   private readonly SWAP_PROGRAM_IDS = new Set([
-    // Jupiter Aggregator v6
     "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
-    // Raydium v4
     "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
-    // Orca Whirlpools
     "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
-    // Add other DEX program IDs as needed
+    "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP", // Orca v2
+    "SwaPpA9LAaLfeLi3a68M4DjnLqgtticKg6CnyNwgAC8", // Raydium v3
+    "6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MziiL5jek2kBma", // OKX DEX
   ]);
 
   private constructor() {
@@ -113,7 +112,7 @@ export class WalletMonitorService {
         const pubkey = new PublicKey(walletAddress);
         const signatures = await this.connection.getSignaturesForAddress(
           pubkey,
-          { limit: 10 }
+          { limit: 20 }
         );
 
         // Skip if no new transactions
@@ -215,178 +214,166 @@ export class WalletMonitorService {
         .filter((key) => key.signer === false && key.writable === false)
         .map((key) => key.pubkey.toString());
 
-      // Check if this is a simple SOL transfer (deposit/withdrawal)
-      const isSimpleSolTransfer = programIds.length === 0 && solChange !== 0;
+      // Improved swap detection logic
+      const isSwap =
+        programIds.some((id) => this.SWAP_PROGRAM_IDS.has(id)) ||
+        (tx.meta?.innerInstructions?.some((inner) =>
+          inner.instructions.some((ix) => {
+            if ("programId" in ix) {
+              return this.SWAP_PROGRAM_IDS.has(ix.programId.toString());
+            }
+            return false;
+          })
+        ) ??
+          false);
 
-      if (isSimpleSolTransfer) {
-        const solColor = solChange >= 0 ? "\x1b[32m" : "\x1b[31m";
-        const changeSymbol = solChange >= 0 ? "📈" : "📉";
-        const sign = solChange >= 0 ? "+" : "-";
-        console.log(
-          `${solColor}SOL TRANSFER ${changeSymbol} ${sign}${Math.abs(
-            solChange
-          ).toFixed(9)}`
-        );
-        console.log(`Balance: ${postSol.toFixed(9)}${"\x1b[0m"}`);
+      // A transfer is when it's NOT a swap and involves the token program
+      const isTransfer =
+        !isSwap &&
+        programIds.includes(TOKEN_PROGRAM_ID.toString()) &&
+        !programIds.some((id) => this.SWAP_PROGRAM_IDS.has(id));
 
-        // Save transfer to database as a special type of trade
-        const user = this.userCache.get(walletAddress);
-        if (user) {
-          const transferData = {
-            userId: user.id,
-            signature,
-            walletAddress,
-            tokenA: "So11111111111111111111111111111111111111112", // Native SOL mint
-            tokenB: "So11111111111111111111111111111111111111112",
-            type: solChange >= 0 ? "deposit" : "withdrawal",
-            amountA: Math.abs(solChange).toString(),
-            amountB: Math.abs(solChange).toString(),
-            priceUsd: "0",
-            platform: "transfer",
-            txFees: "0",
-            timestamp: new Date(blockTime! * 1000),
-            rawData: tx,
-            tradePnl: "0", // Transfers don't affect PnL
-          } as const;
-
-          await db
-            .insert(tradesTable)
-            .values(transferData)
-            .onConflictDoUpdate({
-              target: [tradesTable.signature],
-              set: transferData,
-            });
-
-          // Update the daily PnL with the new balance but don't affect realized PnL
-          await this.updateDailyPnL(walletAddress, postSol, 0);
-        }
-        return; // Skip rest of processing since this is just a transfer
-      }
-
-      // Check if this is a trade/swap transaction
-      const isSwap = programIds.some((id) => this.SWAP_PROGRAM_IDS.has(id));
-
-      // Skip if not a swap and not involving token program
-      if (!isSwap && !programIds.includes(TOKEN_PROGRAM_ID.toString())) {
-        return;
-      }
-
-      // Skip if it's just a token account creation
-      if (
-        programIds.includes(ASSOCIATED_TOKEN_PROGRAM_ID.toString()) &&
-        programIds.length === 1
-      ) {
-        return;
-      }
-
-      const {
-        preBalances = [],
-        postBalances = [],
-        preTokenBalances = [],
-        postTokenBalances = [],
-      } = tx.meta;
-
-      // Skip if no token balance changes
-      if (preTokenBalances?.length === 0 && postTokenBalances?.length === 0) {
-        return;
-      }
-
-      const user = this.userCache.get(walletAddress);
-      if (!user) {
-        console.error(`No user found for wallet ${walletAddress}`);
-        return;
-      }
-
-      const solColor = solChange >= 0 ? "\x1b[32m" : "\x1b[31m";
-      const changeSymbol = solChange >= 0 ? "📈" : "📉";
-      const sign = solChange >= 0 ? "+" : "-";
-      console.log(
-        `${solColor}SOL ${changeSymbol} ${sign}${Math.abs(solChange).toFixed(
-          9
-        )}`
-      );
-      console.log(`Balance: ${postSol.toFixed(9)}${"\x1b[0m"}`);
-
-      console.log("Debug transaction details:", {
+      console.log("Transaction type:", {
         signature,
-        preSol,
-        postSol,
-        basicSolChange: solChange,
-        totalSolChange: solChange,
-        hasInnerInstructions: !!tx.meta.innerInstructions?.length,
-        programIds: tx.transaction.message.accountKeys
-          .filter((key) => key.signer === false && key.writable === false)
-          .map((key) => key.pubkey.toString()),
+        isSwap,
+        isTransfer,
+        programIds,
+        hasInnerInstructions: !!tx.meta?.innerInstructions?.length,
       });
 
-      // Only look at token changes for our specific wallet
-      postTokenBalances?.forEach(async (post) => {
-        if (post.owner === walletAddress) {
-          const pre = preTokenBalances?.find(
-            (p) => p.accountIndex === post.accountIndex
-          );
-          const preAmount = pre?.uiTokenAmount?.uiAmount ?? 0;
-          const postAmount = post.uiTokenAmount?.uiAmount ?? 0;
-          const change = postAmount - preAmount;
+      if (isTransfer) {
+        // Handle transfers
+        const {
+          preBalances = [],
+          postBalances = [],
+          preTokenBalances = [],
+          postTokenBalances = [],
+        } = tx.meta;
 
-          // Skip wrapped SOL and zero changes
-          if (
-            post.mint === "So11111111111111111111111111111111111111112" ||
-            change === 0
-          )
-            return;
+        postTokenBalances?.forEach(async (post) => {
+          if (post.owner === walletAddress) {
+            const pre = preTokenBalances?.find(
+              (p) => p.accountIndex === post.accountIndex
+            );
+            const preAmount = pre?.uiTokenAmount?.uiAmount ?? 0;
+            const postAmount = post.uiTokenAmount?.uiAmount ?? 0;
+            const change = postAmount - preAmount;
 
-          const isBuy = change > 0;
-          const changeSymbol = isBuy ? "📈" : "📉";
-          const color = isBuy ? "\x1b[32m" : "\x1b[31m";
-          const resetColor = "\x1b[0m";
+            if (change === 0) return;
 
-          console.log(`${color}${isBuy ? "BUY" : "SELL"} ${post.mint}`);
-          console.log(
-            `Amount: ${changeSymbol} ${Math.abs(change).toLocaleString(
-              undefined,
-              { maximumFractionDigits: 9 }
-            )}`
-          );
-          console.log(
-            `Final Balance: ${postAmount.toLocaleString(undefined, {
-              maximumFractionDigits: 9,
-            })}${resetColor}`
-          );
+            const isDeposit = change > 0;
+            const changeSymbol = isDeposit ? "📈" : "📉";
+            const color = isDeposit ? "\x1b[32m" : "\x1b[31m";
 
-          // Save trade to database
-          const tradeData = {
-            userId: user.id,
-            signature,
-            walletAddress,
-            tokenA: post.mint,
-            tokenB: "So11111111111111111111111111111111111111112",
-            type: isBuy ? "buy" : "sell",
-            amountA: Math.abs(change).toString(),
-            amountB: Math.abs(solChange).toString(),
-            priceUsd: "0",
-            platform: "unknown",
-            txFees: "0",
-            timestamp: new Date(blockTime! * 1000),
-            rawData: tx,
-            tradePnl: isBuy
-              ? (-Math.abs(solChange)).toString() // When buying, lose SOL
-              : Math.abs(solChange).toString(), // When selling, gain SOL
-          } as const;
+            console.log(
+              `${color}TOKEN ${isDeposit ? "DEPOSIT" : "WITHDRAWAL"}: ${
+                post.mint
+              }`
+            );
+            console.log(
+              `Amount: ${changeSymbol} ${Math.abs(change).toLocaleString(
+                undefined,
+                { maximumFractionDigits: 9 }
+              )}`
+            );
+            console.log(`Final Balance: ${postAmount}${"\x1b[0m"}`);
 
-          await db
-            .insert(tradesTable)
-            .values(tradeData)
-            .onConflictDoUpdate({
-              target: [tradesTable.signature],
-              set: tradeData,
-            });
+            // Save transfer to database
+            const transferData = {
+              userId: this.userCache.get(walletAddress)?.id,
+              signature,
+              walletAddress,
+              tokenA: post.mint,
+              tokenB: post.mint,
+              type: isDeposit ? "deposit" : "withdrawal",
+              amountA: Math.abs(change).toString(),
+              amountB: Math.abs(change).toString(),
+              priceUsd: "0",
+              platform: "transfer",
+              txFees: "0",
+              timestamp: new Date(blockTime! * 1000),
+              rawData: tx,
+              tradePnl: "0", // Transfers don't affect PnL
+            } as const;
 
-          // After processing a trade, update the daily PnL
-          const tradePnl = parseFloat(tradeData.tradePnl);
-          await this.updateDailyPnL(walletAddress, postSol, tradePnl);
-        }
-      });
+            await db
+              .insert(tradesTable)
+              .values(transferData)
+              .onConflictDoUpdate({
+                target: [tradesTable.signature],
+                set: transferData,
+              });
+
+            // Important: Don't call updateDailyPnL for transfers at all
+            // Remove or comment out this block:
+            /*
+            if (post.mint === "So11111111111111111111111111111111111111112") {
+              await this.updateDailyPnL(walletAddress, postAmount, 0);
+            }
+            */
+          }
+        });
+      } else if (isSwap) {
+        // Process token changes for swaps
+        const {
+          preBalances = [],
+          postBalances = [],
+          preTokenBalances = [],
+          postTokenBalances = [],
+        } = tx.meta;
+
+        postTokenBalances?.forEach(async (post) => {
+          if (post.owner === walletAddress) {
+            const pre = preTokenBalances?.find(
+              (p) => p.accountIndex === post.accountIndex
+            );
+            const preAmount = pre?.uiTokenAmount?.uiAmount ?? 0;
+            const postAmount = post.uiTokenAmount?.uiAmount ?? 0;
+            const change = postAmount - preAmount;
+
+            // Skip if no change or wrapped SOL
+            if (
+              change === 0 ||
+              post.mint === "So11111111111111111111111111111111111111112"
+            ) {
+              return;
+            }
+
+            const isBuy = change > 0;
+            const tradePnl = isBuy ? -Math.abs(solChange) : Math.abs(solChange);
+
+            const tradeData = {
+              userId: this.userCache.get(walletAddress)?.id,
+              signature,
+              walletAddress,
+              tokenA: post.mint,
+              tokenB: "So11111111111111111111111111111111111111112",
+              type: isBuy ? "buy" : "sell",
+              amountA: Math.abs(change).toString(),
+              amountB: Math.abs(solChange).toString(),
+              priceUsd: "0",
+              platform:
+                programIds.find((id) => this.SWAP_PROGRAM_IDS.has(id)) ||
+                "unknown",
+              txFees: "0",
+              timestamp: new Date(blockTime! * 1000),
+              rawData: tx,
+              tradePnl: tradePnl.toString(),
+            } as const;
+
+            await db
+              .insert(tradesTable)
+              .values(tradeData)
+              .onConflictDoUpdate({
+                target: [tradesTable.signature],
+                set: tradeData,
+              });
+
+            // Update PnL for swaps
+            await this.updateDailyPnL(walletAddress, postSol, tradePnl);
+          }
+        });
+      }
     } catch (error) {
       console.error(`❌ Error processing transaction ${signature}:`, error);
     }
@@ -499,10 +486,14 @@ export class WalletMonitorService {
     const cache = this.dailyPnLCache.get(walletAddress);
     if (!cache) return;
 
+    // Only increment totalTrades for actual trades (not transfers)
+    if (tradePnl !== 0) {
+      cache.totalTrades += 1;
+    }
+
     // Update cache
     cache.currentBalance = currentBalance;
     cache.realizedPnl += tradePnl;
-    cache.totalTrades += 1;
 
     // Update database
     await db
