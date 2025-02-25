@@ -170,12 +170,68 @@ export class WalletMonitorService {
     blockTime?: number
   ) {
     try {
+      // Skip if no blockTime or transaction is from before today
+      if (!blockTime) return;
+
+      const txDate = this.getPSTDate(new Date(blockTime * 1000));
+      const todayStart = this.getPSTStartOfDay();
+      const todayEnd = this.getPSTEndOfDay();
+
+      if (txDate < todayStart || txDate > todayEnd) {
+        console.log(
+          "Skipping transaction from:",
+          txDate.toISOString(),
+          "- Not from today"
+        );
+        return;
+      }
+
+      console.log("\n🔍 Processing Transaction:", {
+        signature,
+        timestamp: new Date(blockTime * 1000).toISOString(),
+      });
+
       const tx = await this.connection.getParsedTransaction(signature, {
         maxSupportedTransactionVersion: 0,
         commitment: "confirmed",
       });
 
       if (!tx?.meta) return;
+
+      // Find wallet's account index and SOL changes
+      const walletAccountIndex = tx.transaction.message.accountKeys.findIndex(
+        (account) => account.pubkey.toString() === walletAddress
+      );
+
+      if (walletAccountIndex === -1) return;
+
+      // Calculate SOL changes including transaction fees
+      const preSol = tx.meta.preBalances[walletAccountIndex] / 1e9;
+      const postSol = tx.meta.postBalances[walletAccountIndex] / 1e9;
+      const solChange = postSol - preSol;
+
+      // Calculate total SOL change including inner instructions
+      let totalSolChange = solChange;
+      if (tx.meta.innerInstructions) {
+        for (const inner of tx.meta.innerInstructions) {
+          for (const ix of inner.instructions) {
+            if (
+              "parsed" in ix &&
+              ix.parsed.type === "transfer" &&
+              ix.parsed.info.destination === walletAddress
+            ) {
+              totalSolChange -= Number(ix.parsed.info.lamports) / 1e9;
+            }
+            if (
+              "parsed" in ix &&
+              ix.parsed.type === "transfer" &&
+              ix.parsed.info.source === walletAddress
+            ) {
+              totalSolChange += Number(ix.parsed.info.lamports) / 1e9;
+            }
+          }
+        }
+      }
 
       // Get all program IDs involved in this transaction
       const programIds = tx.transaction.message.accountKeys
@@ -216,26 +272,27 @@ export class WalletMonitorService {
         return;
       }
 
-      // Find wallet's account index and SOL changes
-      const walletAccountIndex = tx.transaction.message.accountKeys.findIndex(
-        (account) => account.pubkey.toString() === walletAddress
-      );
-
-      if (walletAccountIndex === -1) return;
-
-      const preSol = preBalances[walletAccountIndex] / 1e9;
-      const postSol = postBalances[walletAccountIndex] / 1e9;
-      const solChange = postSol - preSol;
-
-      const solColor = solChange >= 0 ? "\x1b[32m" : "\x1b[31m";
-      const changeSymbol = solChange >= 0 ? "📈" : "📉";
-      const sign = solChange >= 0 ? "+" : "-";
+      const solColor = totalSolChange >= 0 ? "\x1b[32m" : "\x1b[31m";
+      const changeSymbol = totalSolChange >= 0 ? "📈" : "📉";
+      const sign = totalSolChange >= 0 ? "+" : "-";
       console.log(
-        `${solColor}SOL ${changeSymbol} ${sign}${Math.abs(solChange).toFixed(
-          9
-        )}`
+        `${solColor}SOL ${changeSymbol} ${sign}${Math.abs(
+          totalSolChange
+        ).toFixed(9)}`
       );
       console.log(`Balance: ${postSol.toFixed(9)}${"\x1b[0m"}`);
+
+      console.log("Debug transaction details:", {
+        signature,
+        preSol,
+        postSol,
+        basicSolChange: solChange,
+        totalSolChange,
+        hasInnerInstructions: !!tx.meta.innerInstructions?.length,
+        programIds: tx.transaction.message.accountKeys
+          .filter((key) => key.signer === false && key.writable === false)
+          .map((key) => key.pubkey.toString()),
+      });
 
       // Only look at token changes for our specific wallet
       postTokenBalances?.forEach(async (post) => {
@@ -281,15 +338,15 @@ export class WalletMonitorService {
             tokenB: "So11111111111111111111111111111111111111112",
             type: isBuy ? "buy" : "sell",
             amountA: Math.abs(change).toString(),
-            amountB: Math.abs(solChange).toString(),
+            amountB: Math.abs(totalSolChange).toString(),
             priceUsd: "0",
             platform: "unknown",
             txFees: "0",
             timestamp: new Date(blockTime! * 1000),
             rawData: tx,
             tradePnl: isBuy
-              ? (-Math.abs(solChange)).toString() // When buying, lose SOL
-              : Math.abs(solChange).toString(), // When selling, gain SOL
+              ? (-Math.abs(totalSolChange)).toString() // When buying, lose SOL
+              : Math.abs(totalSolChange).toString(), // When selling, gain SOL
           } as const;
 
           await db
