@@ -33,6 +33,7 @@ export class WalletMonitorService {
     "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP", // Orca v2
     "SwaPpA9LAaLfeLi3a68M4DjnLqgtticKg6CnyNwgAC8", // Raydium v3
     "6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MziiL5jek2kBma", // OKX DEX
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", // pumpfun
   ]);
 
   private constructor() {
