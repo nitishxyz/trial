@@ -6,8 +6,9 @@ import {
 import { db } from "../../db";
 import { tradesTable, usersTable, pnlRecordsTable } from "../../db/schema";
 import { eq, and, desc } from "drizzle-orm";
+import { EventEmitter } from "events";
 
-export class WalletMonitorService {
+export class WalletMonitorService extends EventEmitter {
   private connection: Connection;
   private activeWallets: Set<string> = new Set();
   private static instance: WalletMonitorService;
@@ -38,6 +39,7 @@ export class WalletMonitorService {
   ]);
 
   private constructor() {
+    super(); // Initialize EventEmitter
     this.connection = new Connection(process.env.SOLANA_RPC_URL!, "confirmed");
   }
 
@@ -91,6 +93,9 @@ export class WalletMonitorService {
         console.log(`\n💰 Wallet ${walletAddress} Balance:`);
         console.log(`◎ SOL: ${(balance / 1e9).toFixed(9)}`);
         console.log("🪙 Tokens:");
+
+        const tokenBalances: { mint: string; amount: number }[] = [];
+
         tokens.value.forEach(({ account }) => {
           const { mint, tokenAmount } = account.data.parsed.info;
           const amount = tokenAmount?.uiAmount ?? 0;
@@ -100,7 +105,15 @@ export class WalletMonitorService {
                 maximumFractionDigits: 6,
               })}`
             );
+            tokenBalances.push({ mint, amount });
           }
+        });
+
+        // Emit balance update event
+        this.emit("balance", walletAddress, {
+          solBalance: balance / 1e9,
+          tokens: tokenBalances,
+          timestamp: new Date(),
         });
       } catch (error) {
         console.error(`❌ Error fetching balance for ${walletAddress}:`, error);
@@ -313,13 +326,23 @@ export class WalletMonitorService {
               tradePnl: "0", // Transfers don't affect PnL
             } as const;
 
-            await db
+            const result = await db
               .insert(tradesTable)
               .values(transferData)
               .onConflictDoUpdate({
                 target: [tradesTable.signature],
                 set: transferData,
               });
+
+            // Emit trade update event
+            this.emit("trade", walletAddress, {
+              ...transferData,
+              id:
+                Array.isArray(result) && result.length > 0
+                  ? result[0]?.insertId
+                  : undefined,
+              timestamp: new Date(blockTime! * 1000),
+            });
 
             // Important: Don't call updateDailyPnL for transfers at all
             // Remove or comment out this block:
@@ -378,13 +401,23 @@ export class WalletMonitorService {
               tradePnl: tradePnl.toString(),
             } as const;
 
-            await db
+            const result = await db
               .insert(tradesTable)
               .values(tradeData)
               .onConflictDoUpdate({
                 target: [tradesTable.signature],
                 set: tradeData,
               });
+
+            // Emit trade update event
+            this.emit("trade", walletAddress, {
+              ...tradeData,
+              id:
+                Array.isArray(result) && result.length > 0
+                  ? result[0]?.insertId
+                  : undefined,
+              timestamp: new Date(blockTime! * 1000),
+            });
 
             // Only update PnL if this is a new trade
             await this.updateDailyPnL(walletAddress, postSol, tradePnl);
@@ -530,5 +563,15 @@ export class WalletMonitorService {
           eq(pnlRecordsTable.date, cache.date)
         )
       );
+
+    // Emit PnL update event
+    this.emit("pnl", walletAddress, {
+      date: cache.date,
+      startBalance: cache.startBalance,
+      currentBalance: cache.currentBalance,
+      realizedPnl: cache.realizedPnl,
+      totalTrades: cache.totalTrades,
+      timestamp: new Date(),
+    });
   }
 }

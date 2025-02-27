@@ -3,8 +3,10 @@
   "module": "index.ts",
   "type": "module",
   "scripts": {
+    "start": "bun run index.ts",
     "seed": "bun run src/db/seed.ts",
-    "monitor": "bun run src/scripts/test-monitor.ts"
+    "monitor": "bun run src/scripts/test-monitor.ts",
+    "monitor:new": "bun run src/scripts/run-monitor-new.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -18,9 +20,11 @@
     "@coral-xyz/anchor": "^0.30.1",
     "@solana/spl-token": "^0.4.12",
     "@solana/web3.js": "^1.98.0",
+    "@types/ws": "^8.5.14",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.39.3",
     "pg": "^8.13.3",
-    "redis": "^4.7.0"
+    "redis": "^4.7.0",
+    "ws": "^8.18.1"
   }
 }

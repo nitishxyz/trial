@@ -69,6 +69,29 @@ export const tradesTable = pgTable(
   ]
 );
 
+// Tokens Metadata table
+export const tokensTable = pgTable(
+  "tokens",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    address: varchar("address", { length: 44 }).notNull().unique(), // Token mint address
+    symbol: varchar("symbol", { length: 50 }), // Token symbol e.g., "SOL", "BONK"
+    name: varchar("name", { length: 100 }), // Token full name
+    decimals: integer("decimals"), // Token decimal places
+    logoUrl: varchar("logo_url", { length: 255 }), // URL to token logo
+    coingeckoId: varchar("coingecko_id", { length: 100 }), // CoinGecko ID for price lookups
+    lastPrice: decimal("last_price", { precision: 20, scale: 6 }), // Last known price in USD
+    lastUpdated: timestamp("last_updated").defaultNow(), // When metadata was last updated
+    isVerified: boolean("is_verified").default(false), // Flag for verified tokens
+    createdAt: timestamp("created_at").defaultNow(),
+    metadata: json("metadata"), // Additional metadata
+  },
+  (table) => [
+    uniqueIndex("tokens_address_idx").on(table.address),
+    index("tokens_symbol_idx").on(table.symbol),
+  ]
+);
+
 // Daily PnL Records
 export const pnlRecordsTable = pgTable(
   "pnl_records",
@@ -85,12 +108,14 @@ export const pnlRecordsTable = pgTable(
     realizedPnl: decimal("realized_pnl", { precision: 20, scale: 6 }).notNull(),
     unrealizedPnl: decimal("unrealized_pnl", { precision: 20, scale: 6 }),
     totalTrades: integer("total_trades").notNull(),
+    lastTradeId: integer("last_trade_id").references(() => tradesTable.id), // Reference to the last trade
     createdAt: timestamp("created_at").defaultNow(),
     updatedAt: timestamp("updated_at").defaultNow(),
   },
   (table) => [
     index("pnl_records_user_id_idx").on(table.userId),
     index("pnl_records_wallet_date_idx").on(table.walletAddress, table.date),
+    index("pnl_records_last_trade_idx").on(table.lastTradeId),
   ]
 );
 
@@ -161,6 +186,14 @@ export const pnlRecordsRelations = relations(pnlRecordsTable, ({ one }) => ({
     fields: [pnlRecordsTable.userId],
     references: [usersTable.id],
   }),
+  lastTrade: one(tradesTable, {
+    fields: [pnlRecordsTable.lastTradeId],
+    references: [tradesTable.id],
+  }),
+}));
+
+export const tokensRelations = relations(tokensTable, ({ many }) => ({
+  trades: many(tradesTable),
 }));
 
 export const streamSessionsRelations = relations(
