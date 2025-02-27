@@ -727,62 +727,92 @@ export class WalletMonitorServiceNew extends EventEmitter {
     tradePnl: number,
     lastTradeId?: number
   ) {
-    const cache = this.dailyPnLCache.get(walletAddress);
-    if (!cache) {
-      console.log(`No daily PnL cache for ${walletAddress}, initializing...`);
-      await this.initializeDailyPnL(walletAddress, currentBalance);
-      return;
-    }
+    try {
+      const today = this.getPSTStartOfDay();
 
-    // Only increment totalTrades for actual trades (not transfers)
-    if (tradePnl !== 0) {
-      cache.totalTrades += 1;
-    }
-
-    // Update cache
-    cache.currentBalance = currentBalance;
-    cache.realizedPnl += tradePnl;
-
-    // Prepare update data
-    const updateData: any = {
-      endBalance: currentBalance.toString(),
-      realizedPnl: cache.realizedPnl.toString(),
-      totalTrades: cache.totalTrades,
-      updatedAt: new Date(),
-    };
-
-    // Add lastTradeId if available
-    if (lastTradeId) {
-      updateData.lastTradeId = lastTradeId;
-    }
-
-    // Update database
-    await db
-      .update(pnlRecordsTable)
-      .set(updateData)
-      .where(
-        and(
-          eq(pnlRecordsTable.walletAddress, walletAddress),
-          eq(pnlRecordsTable.date, cache.date)
+      // Get current PnL record for today
+      const currentRecord = await db
+        .select()
+        .from(pnlRecordsTable)
+        .where(
+          and(
+            eq(pnlRecordsTable.walletAddress, walletAddress),
+            eq(pnlRecordsTable.date, today)
+          )
         )
-      );
+        .limit(1);
 
-    console.log(`Updated daily PnL for ${walletAddress}:`, {
-      realizedPnl: cache.realizedPnl,
-      totalTrades: cache.totalTrades,
-      lastTradeId: lastTradeId || "none",
-    });
+      if (currentRecord.length === 0) {
+        // Initialize new record if none exists
+        console.log(`Creating new PnL record for ${walletAddress}`);
+        await db.insert(pnlRecordsTable).values({
+          walletAddress,
+          userId: this.activeWallets.get(walletAddress)?.userId,
+          date: today,
+          startBalance: currentBalance.toString(),
+          endBalance: currentBalance.toString(),
+          realizedPnl: tradePnl.toString(),
+          totalTrades: 1,
+          lastTradeId: lastTradeId,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } else {
+        // Update existing record
+        const record = currentRecord[0];
+        const newRealizedPnl = parseFloat(record.realizedPnl) + tradePnl;
+        const newTotalTrades = record.totalTrades + 1;
 
-    // Emit PnL update event
-    this.emit("pnl", walletAddress, {
-      date: cache.date,
-      startBalance: cache.startBalance,
-      currentBalance: cache.currentBalance,
-      realizedPnl: cache.realizedPnl,
-      totalTrades: cache.totalTrades,
-      lastTradeId: lastTradeId,
-      timestamp: new Date(),
-    });
+        console.log(`Updating PnL record for ${walletAddress}:`, {
+          currentPnl: record.realizedPnl,
+          tradePnl,
+          newRealizedPnl,
+          totalTrades: newTotalTrades,
+        });
+
+        await db
+          .update(pnlRecordsTable)
+          .set({
+            endBalance: currentBalance.toString(),
+            realizedPnl: newRealizedPnl.toString(),
+            totalTrades: newTotalTrades,
+            lastTradeId: lastTradeId || record.lastTradeId,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(pnlRecordsTable.walletAddress, walletAddress),
+              eq(pnlRecordsTable.date, today)
+            )
+          );
+      }
+
+      // Update cache with the latest values
+      this.dailyPnLCache.set(walletAddress, {
+        date: today,
+        startBalance: currentRecord[0]?.startBalance
+          ? parseFloat(currentRecord[0].startBalance)
+          : currentBalance,
+        currentBalance,
+        realizedPnl: currentRecord[0]
+          ? parseFloat(currentRecord[0].realizedPnl) + tradePnl
+          : tradePnl,
+        totalTrades: (currentRecord[0]?.totalTrades || 0) + 1,
+      });
+
+      // Emit PnL update event
+      this.emit("pnl", walletAddress, {
+        date: today,
+        startBalance: this.dailyPnLCache.get(walletAddress)?.startBalance,
+        currentBalance,
+        realizedPnl: this.dailyPnLCache.get(walletAddress)?.realizedPnl,
+        totalTrades: this.dailyPnLCache.get(walletAddress)?.totalTrades,
+        lastTradeId,
+        timestamp: new Date(),
+      });
+    } catch (error) {
+      console.error(`Error updating daily PnL for ${walletAddress}:`, error);
+    }
   }
 
   /**
